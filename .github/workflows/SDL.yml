@@ -7,10 +7,10 @@ on:
     
 
 jobs:
-   IDE-IDE-Manual:
+   SDL-FNA3D:
     runs-on: ubuntu-latest
     steps:
-      - name: IDE - Dispatch initiating repository event
+      - name: SDL - Dispatch initiating repository event
         if: github.event.action != 'FNA3D'
         run: |
           curl -X POST https://api.github.com/repos/YoYoGames/YoYoStudio/dispatches \
