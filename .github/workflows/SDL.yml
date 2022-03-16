@@ -1,0 +1,25 @@
+name: Remote Dispatch Action Initiator
+
+on:
+  push:
+  repository_dispatch:
+  workflow_dispatch:
+    
+
+jobs:
+   IDE-IDE-Manual:
+    runs-on: ubuntu-latest
+    steps:
+      - name: IDE - Dispatch initiating repository event
+        if: github.event.action != 'FNA3D'
+        run: |
+          curl -X POST https://api.github.com/repos/YoYoGames/YoYoStudio/dispatches \
+          -H 'Accept: application/vnd.github.everest-preview+json' \
+          --data '{"event_type": "SDL", "client_payload": { "repository": "'"$GITHUB_REPOSITORY"'" }}'
+      - name: ACK - Acknowledge FNA3D from remote repository
+        if: github.event.action == 'FNA3D'
+        run: |
+          echo "IDE-Manual received from '${{ github.event.client_payload.repository }}'" && \
+          curl -X POST https://api.github.com/repos/YoYoGames/YoYoStudio/dispatches \
+          -H 'Accept: application/vnd.github.everest-preview+json' \
+          --data '{"event_type": "ack", "client_payload": { "repository": "'"$GITHUB_REPOSITORY"'" }}'
