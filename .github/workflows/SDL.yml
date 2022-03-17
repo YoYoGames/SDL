@@ -18,7 +18,7 @@ jobs:
       - name: ACK - Acknowledge FNA3D from remote repository
         if: github.event.action == 'FNA3D'
         run: |
-          echo "IDE-Manual received from '${{ github.event.client_payload.repository }}'" && \
+          echo "FNA3D received from '${{ github.event.client_payload.repository }}'" && \
           curl -X POST https://api.github.com/repos/YoYoGames/YoYoStudio/dispatches \
           -H 'Accept: application/vnd.github.everest-preview+json' \
           --data '{"event_type": "ack", "client_payload": { "repository": "'"$GITHUB_REPOSITORY"'" }}'
