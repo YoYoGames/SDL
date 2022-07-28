@@ -69,7 +69,8 @@ typedef enum
     SDL_CONTROLLER_TYPE_VIRTUAL,
     SDL_CONTROLLER_TYPE_PS5,
     SDL_CONTROLLER_TYPE_AMAZON_LUNA,
-    SDL_CONTROLLER_TYPE_GOOGLE_STADIA
+    SDL_CONTROLLER_TYPE_GOOGLE_STADIA,
+    SDL_CONTROLLER_TYPE_NVIDIA_SHIELD
 } SDL_GameControllerType;
 
 typedef enum
@@ -492,6 +493,18 @@ extern DECLSPEC Uint16 SDLCALL SDL_GameControllerGetProduct(SDL_GameController *
  * \since This function is available since SDL 2.0.6.
  */
 extern DECLSPEC Uint16 SDLCALL SDL_GameControllerGetProductVersion(SDL_GameController *gamecontroller);
+
+/**
+ * Get the firmware version of an opened controller, if available.
+ *
+ * If the firmware version isn't available this function returns 0.
+ *
+ * \param gamecontroller the game controller object to query.
+ * \return the controller firmware version, or zero if unavailable.
+ *
+ * \since This function is available since SDL 2.24.0.
+ */
+extern DECLSPEC Uint16 SDLCALL SDL_GameControllerGetFirmwareVersion(SDL_GameController *gamecontroller);
 
 /**
  * Get the serial number of an opened controller, if available.

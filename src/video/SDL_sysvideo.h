@@ -307,7 +307,7 @@ struct SDL_VideoDevice
     /* Text input */
     void (*StartTextInput) (_THIS);
     void (*StopTextInput) (_THIS);
-    void (*SetTextInputRect) (_THIS, SDL_Rect *rect);
+    void (*SetTextInputRect) (_THIS, const SDL_Rect *rect);
     void (*ClearComposition) (_THIS);
     SDL_bool (*IsTextInputShown) (_THIS);
 
@@ -432,7 +432,7 @@ typedef struct VideoBootStrap
 {
     const char *name;
     const char *desc;
-    SDL_VideoDevice *(*create) (int devindex);
+    SDL_VideoDevice *(*create) (void);
 } VideoBootStrap;
 
 /* Not all of these are available in a given build. Use #ifdefs, etc. */

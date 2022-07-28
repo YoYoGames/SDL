@@ -40,7 +40,6 @@
 #include "SDL_timer.h"
 #include "../usb_ids.h"
 #include "../SDL_sysjoystick.h"
-#include "../controller_type.h"
 #include "../../core/windows/SDL_windows.h"
 #include "../../core/windows/SDL_hid.h"
 #include "../hidapi/SDL_hidapijoystick_c.h"
@@ -746,7 +745,7 @@ RAWINPUT_AddDevice(HANDLE hDevice)
     device->product_id = (Uint16)rdi.hid.dwProductId;
     device->version = (Uint16)rdi.hid.dwVersionNumber;
     device->is_xinput = SDL_TRUE;
-    device->is_xboxone = GuessControllerType(device->vendor_id, device->product_id) == k_eControllerType_XBoxOneController;
+    device->is_xboxone = SDL_IsJoystickXboxOne(device->vendor_id, device->product_id);
 
     /* Get HID Top-Level Collection Preparsed Data */
     size = 0;
@@ -1350,15 +1349,15 @@ RAWINPUT_JoystickRumbleTriggers(SDL_Joystick *joystick, Uint16 left_rumble, Uint
 static Uint32
 RAWINPUT_JoystickGetCapabilities(SDL_Joystick *joystick)
 {
-    RAWINPUT_DeviceContext *ctx = joystick->hwdata;
     Uint32 result = 0;
+#if defined(SDL_JOYSTICK_RAWINPUT_XINPUT) || defined(SDL_JOYSTICK_RAWINPUT_WGI)
+    RAWINPUT_DeviceContext *ctx = joystick->hwdata;
 
 #ifdef SDL_JOYSTICK_RAWINPUT_XINPUT
     if (ctx->is_xinput) {
         result |= SDL_JOYCAP_RUMBLE;
     }
 #endif
-
 #ifdef SDL_JOYSTICK_RAWINPUT_WGI
     if (ctx->is_xinput) {
         result |= SDL_JOYCAP_RUMBLE;
@@ -1368,6 +1367,7 @@ RAWINPUT_JoystickGetCapabilities(SDL_Joystick *joystick)
         }
     }
 #endif
+#endif /**/
 
     return result;
 }

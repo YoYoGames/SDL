@@ -260,6 +260,7 @@ typedef struct {
     Uint32 m_unRumblePending;
     SDL_bool m_bHasSensors;
     SDL_bool m_bReportSensors;
+    Uint32 m_unLastInput;
 
     SwitchInputOnlyControllerStatePacket_t m_lastInputOnlyState;
     SwitchSimpleStatePacket_t m_lastSimpleState;
@@ -305,7 +306,27 @@ HasHomeLED(int vendor_id, int product_id)
         return SDL_FALSE;
     }
 
+    /* The Nintendo Online classic controllers don't have a Home LED */
+    if (vendor_id == USB_VENDOR_NINTENDO &&
+        (product_id == USB_PRODUCT_NINTENDO_N64_CONTROLLER ||
+         product_id == USB_PRODUCT_NINTENDO_SEGA_GENESIS_CONTROLLER ||
+         product_id == USB_PRODUCT_NINTENDO_SNES_CONTROLLER)) {
+        return SDL_FALSE;
+    }
+
     return SDL_TRUE;
+}
+
+static SDL_bool
+AlwaysUsesLabels(int vendor_id, int product_id)
+{
+    /* These controllers don't have a diamond button configuration, so always use labels */
+    if (vendor_id == USB_VENDOR_NINTENDO &&
+        (product_id == USB_PRODUCT_NINTENDO_N64_CONTROLLER ||
+         product_id == USB_PRODUCT_NINTENDO_SEGA_GENESIS_CONTROLLER)) {
+        return SDL_TRUE;
+    }
+    return SDL_FALSE;
 }
 
 static SDL_bool
@@ -342,7 +363,7 @@ HIDAPI_DriverSwitch_IsSupportedDevice(const char *name, SDL_GameControllerType t
 }
 
 static const char *
-HIDAPI_DriverSwitch_GetDeviceName(Uint16 vendor_id, Uint16 product_id)
+HIDAPI_DriverSwitch_GetDeviceName(const char *name, Uint16 vendor_id, Uint16 product_id)
 {
     /* Give a user friendly name for this controller */
     if (vendor_id == USB_VENDOR_NINTENDO) {
@@ -351,11 +372,27 @@ HIDAPI_DriverSwitch_GetDeviceName(Uint16 vendor_id, Uint16 product_id)
         }
 
         if (product_id == USB_PRODUCT_NINTENDO_SWITCH_JOY_CON_LEFT) {
-            return "Nintendo Switch Joy-Con Left";
+            return "Nintendo Switch Joy-Con (L)";
         }
 
         if (product_id == USB_PRODUCT_NINTENDO_SWITCH_JOY_CON_RIGHT) {
-            return "Nintendo Switch Joy-Con Right";
+            /* Use the given name for the Nintendo Online NES Controllers */
+            if (SDL_strncmp(name, "NES Controller", 14) == 0) {
+                return name;
+            }
+            return "Nintendo Switch Joy-Con (R)";
+        }
+
+        if (product_id == USB_PRODUCT_NINTENDO_N64_CONTROLLER) {
+            return "Nintendo N64 Controller";
+        }
+
+        if (product_id == USB_PRODUCT_NINTENDO_SEGA_GENESIS_CONTROLLER) {
+            return "Nintendo SEGA Genesis Controller";
+        }
+
+        if (product_id == USB_PRODUCT_NINTENDO_SNES_CONTROLLER) {
+            return "Nintendo SNES Controller";
         }
     }
 
@@ -709,6 +746,24 @@ static SDL_bool SetHomeLED(SDL_DriverSwitch_Context *ctx, Uint8 brightness)
     return WriteSubcommand(ctx, k_eSwitchSubcommandIDs_SetHomeLight, rgucBuffer, sizeof(rgucBuffer), NULL);
 }
 
+static void SDLCALL SDL_HomeLEDHintChanged(void *userdata, const char *name, const char *oldValue, const char *hint)
+{
+    SDL_DriverSwitch_Context *ctx = (SDL_DriverSwitch_Context *)userdata;
+
+    if (hint && *hint) {
+        int value;
+
+        if (SDL_strchr(hint, '.') != NULL) {
+            value = (int)(100.0f * SDL_atof(hint));
+        } else if (SDL_GetStringBoolean(hint, SDL_TRUE)) {
+            value = 100;
+        } else {
+            value = 0;
+        }
+        SetHomeLED(ctx, value);
+    }
+}
+
 static SDL_bool SetSlotLED(SDL_DriverSwitch_Context *ctx, Uint8 slot)
 {
     Uint8 led_data = (1 << slot);
@@ -1030,14 +1085,8 @@ HIDAPI_DriverSwitch_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystick *joysti
 
         /* Set the LED state */
         if (ctx->m_bHasHomeLED) {
-            const char *hint = SDL_GetHint(SDL_HINT_JOYSTICK_HIDAPI_SWITCH_HOME_LED);
-            if (hint && *hint) {
-                if (SDL_GetStringBoolean(hint, SDL_TRUE)) {
-                    SetHomeLED(ctx, 100);
-                } else {
-                    SetHomeLED(ctx, 0);
-                }
-            }
+            SDL_AddHintCallback(SDL_HINT_JOYSTICK_HIDAPI_SWITCH_HOME_LED,
+                                SDL_HomeLEDHintChanged, ctx);
         }
         SetSlotLED(ctx, (joystick->instance_id % 4));
 
@@ -1061,8 +1110,12 @@ HIDAPI_DriverSwitch_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joystick *joysti
         ctx->m_bIsGameCube = SDL_TRUE;
     }
 
-    SDL_AddHintCallback(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS,
-                        SDL_GameControllerButtonReportingHintChanged, ctx);
+    if (AlwaysUsesLabels(device->vendor_id, device->product_id)) {
+        ctx->m_bUseButtonLabels = SDL_TRUE;
+    } else {
+        SDL_AddHintCallback(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS,
+                            SDL_GameControllerButtonReportingHintChanged, ctx);
+    }
 
     /* Initialize the joystick capabilities */
     if (ctx->m_eControllerType == k_eSwitchDeviceInfoControllerType_JoyConLeft ||
@@ -1556,6 +1609,7 @@ HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
     SDL_DriverSwitch_Context *ctx = (SDL_DriverSwitch_Context *)device->context;
     SDL_Joystick *joystick = NULL;
     int size;
+    Uint32 now;
 
     if (device->num_joysticks > 0) {
         joystick = SDL_JoystickFromInstanceID(device->joysticks[0]);
@@ -1563,6 +1617,8 @@ HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
     if (!joystick) {
         return SDL_FALSE;
     }
+
+    now = SDL_GetTicks();
 
     while ((size = ReadInput(ctx)) > 0) {
 #ifdef DEBUG_SWITCH_PROTOCOL
@@ -1574,9 +1630,11 @@ HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
             switch (ctx->m_rgucReadBuffer[0]) {
             case k_eSwitchInputReportIDs_SimpleControllerState:
                 HandleSimpleControllerState(joystick, ctx, (SwitchSimpleStatePacket_t *)&ctx->m_rgucReadBuffer[1]);
+                ctx->m_unLastInput = now;
                 break;
             case k_eSwitchInputReportIDs_FullControllerState:
                 HandleFullControllerState(joystick, ctx, (SwitchStatePacket_t *)&ctx->m_rgucReadBuffer[1]);
+                ctx->m_unLastInput = now;
                 break;
             default:
                 break;
@@ -1584,12 +1642,20 @@ HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
         }
     }
 
+    if (!ctx->m_bInputOnly && !ctx->m_bUsingBluetooth) {
+        const Uint32 INPUT_WAIT_TIMEOUT_MS = 100;
+        if (SDL_TICKS_PASSED(now, ctx->m_unLastInput + INPUT_WAIT_TIMEOUT_MS)) {
+            /* Steam may have put the controller back into non-reporting mode */
+            WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_ForceUSB, NULL, 0, SDL_FALSE);
+        }
+    }
+
     if (ctx->m_bRumblePending || ctx->m_bRumbleZeroPending) {
         HIDAPI_DriverSwitch_SendPendingRumble(ctx);
     } else if (ctx->m_bRumbleActive &&
-               SDL_TICKS_PASSED(SDL_GetTicks(), ctx->m_unRumbleSent + RUMBLE_REFRESH_FREQUENCY_MS)) {
+               SDL_TICKS_PASSED(now, ctx->m_unRumbleSent + RUMBLE_REFRESH_FREQUENCY_MS)) {
 #ifdef DEBUG_RUMBLE
-        SDL_Log("Sent continuing rumble, %d ms after previous rumble\n", SDL_GetTicks() - ctx->m_unRumbleSent);
+        SDL_Log("Sent continuing rumble, %d ms after previous rumble\n", now - ctx->m_unRumbleSent);
 #endif
         WriteRumble(ctx);
     }
@@ -1613,6 +1679,9 @@ HIDAPI_DriverSwitch_CloseJoystick(SDL_HIDAPI_Device *device, SDL_Joystick *joyst
 
     SDL_DelHintCallback(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS,
                         SDL_GameControllerButtonReportingHintChanged, ctx);
+
+    SDL_DelHintCallback(SDL_HINT_JOYSTICK_HIDAPI_SWITCH_HOME_LED,
+                        SDL_HomeLEDHintChanged, ctx);
 
     SDL_LockMutex(device->dev_lock);
     {

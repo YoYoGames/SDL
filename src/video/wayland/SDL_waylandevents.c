@@ -25,11 +25,12 @@
 
 #include "SDL_stdinc.h"
 #include "SDL_timer.h"
+#include "SDL_hints.h"
 
 #include "../../core/unix/SDL_poll.h"
-#include "../../events/SDL_sysevents.h"
 #include "../../events/SDL_events_c.h"
 #include "../../events/scancodes_xfree86.h"
+#include "../SDL_sysvideo.h"
 
 #include "SDL_waylandvideo.h"
 #include "SDL_waylandevents_c.h"
@@ -294,6 +295,12 @@ Wayland_WaitEventTimeout(_THIS, int timeout)
         }
     }
 
+#ifdef HAVE_LIBDECOR_H
+    if (d->shell.libdecor) {
+        libdecor_dispatch(d->shell.libdecor, timeout);
+    }
+#endif
+
     /* wl_display_prepare_read() will return -1 if the default queue is not empty.
      * If the default queue is empty, it will prepare us for our SDL_IOReady() call. */
     if (WAYLAND_wl_display_prepare_read(d->display) == 0) {
@@ -472,8 +479,12 @@ ProcessHitTest(struct SDL_WaylandInput *input, uint32_t serial)
         };
 
 #ifdef HAVE_LIBDECOR_H
-        /* ditto for libdecor. */
-        const uint32_t *directions_libdecor = directions;
+        static const uint32_t directions_libdecor[] = {
+            LIBDECOR_RESIZE_EDGE_TOP_LEFT, LIBDECOR_RESIZE_EDGE_TOP,
+            LIBDECOR_RESIZE_EDGE_TOP_RIGHT, LIBDECOR_RESIZE_EDGE_RIGHT,
+            LIBDECOR_RESIZE_EDGE_BOTTOM_RIGHT, LIBDECOR_RESIZE_EDGE_BOTTOM,
+            LIBDECOR_RESIZE_EDGE_BOTTOM_LEFT, LIBDECOR_RESIZE_EDGE_LEFT
+        };
 #endif
 
         switch (rc) {
@@ -1548,18 +1559,33 @@ text_input_preedit_string(void *data,
     char buf[SDL_TEXTEDITINGEVENT_TEXT_SIZE];
     text_input->has_preedit = SDL_TRUE;
     if (text) {
-        size_t text_bytes = SDL_strlen(text), i = 0;
-        size_t cursor = 0;
-
-        do {
-            const size_t sz = SDL_utf8strlcpy(buf, text+i, sizeof(buf));
-            const size_t chars = SDL_utf8strlen(buf);
-
-            SDL_SendEditingText(buf, cursor, chars);
-
-            i += sz;
-            cursor += chars;
-        } while (i < text_bytes);
+        if (SDL_GetHintBoolean(SDL_HINT_IME_SUPPORT_EXTENDED_TEXT, SDL_FALSE)) {
+            int cursor_begin_utf8 = cursor_begin >= 0 ? (int)SDL_utf8strnlen(text, cursor_begin) : -1;
+            int cursor_end_utf8 = cursor_end >= 0 ? (int)SDL_utf8strnlen(text, cursor_end) : -1;
+            int cursor_size_utf8;
+            if (cursor_end_utf8 >= 0) {
+                if (cursor_begin_utf8 >= 0) {
+                    cursor_size_utf8 = cursor_end_utf8 - cursor_begin_utf8;
+                } else {
+                    cursor_size_utf8 = cursor_end_utf8;
+                }
+            } else {
+                cursor_size_utf8 = -1;
+            }
+            SDL_SendEditingText(text, cursor_begin_utf8, cursor_size_utf8);
+        } else {
+            int text_bytes = (int)SDL_strlen(text), i = 0;
+            int cursor = 0;
+            do {
+                const int sz = (int)SDL_utf8strlcpy(buf, text+i, sizeof(buf));
+                const int chars = (int)SDL_utf8strlen(buf);
+    
+                SDL_SendEditingText(buf, cursor, chars);
+    
+                i += sz;
+                cursor += chars;
+            } while (i < text_bytes);
+        }
     } else {
         buf[0] = '\0';
         SDL_SendEditingText(buf, 0, 0);

@@ -24,6 +24,7 @@
 
 #if SDL_JOYSTICK_DINPUT
 
+#include "SDL_hints.h"
 #include "SDL_windowsjoystick_c.h"
 #include "SDL_dinputjoystick_c.h"
 #include "SDL_rawinputjoystick_c.h"
@@ -253,7 +254,7 @@ SDL_IsXInputDevice(Uint16 vendor_id, Uint16 product_id, const char* hidPath)
         return SDL_TRUE;
     }
 
-    type = SDL_GetJoystickGameControllerType("", vendor_id, product_id, -1, 0, 0, 0);
+    type = SDL_GetJoystickGameControllerTypeFromVIDPID(vendor_id, product_id, NULL, SDL_FALSE);
     if (type == SDL_CONTROLLER_TYPE_XBOX360 ||
         type == SDL_CONTROLLER_TYPE_XBOXONE ||
         (vendor_id == USB_VENDOR_VALVE && product_id == USB_PRODUCT_STEAM_VIRTUAL_GAMEPAD)) {
@@ -397,6 +398,12 @@ SDL_DINPUT_JoystickInit(void)
     HRESULT result;
     HINSTANCE instance;
 
+    if (!SDL_GetHintBoolean(SDL_HINT_DIRECTINPUT_ENABLED, SDL_TRUE)) {
+        /* In some environments, IDirectInput8_Initialize / _EnumDevices can take a minute even with no controllers. */
+        dinput = NULL;
+        return 0;
+    }
+
     result = WIN_CoInitialize();
     if (FAILED(result)) {
         return SetDIerror("CoInitialize", result);
@@ -539,6 +546,10 @@ err:
 void
 SDL_DINPUT_JoystickDetect(JoyStick_DeviceData **pContext)
 {
+    if (dinput == NULL) {
+        return;
+    }
+
     IDirectInput8_EnumDevices(dinput, DI8DEVCLASS_GAMECTRL, EnumJoystickDetectCallback, pContext, DIEDFL_ATTACHEDONLY);
 }
 
