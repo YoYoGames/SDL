@@ -119,6 +119,9 @@ VKeytoScancodeFallback(WPARAM vkey)
     case VK_RIGHT: return SDL_SCANCODE_RIGHT;
     case VK_DOWN: return SDL_SCANCODE_DOWN;
     case VK_CONTROL: return SDL_SCANCODE_LCTRL;
+
+    // SDL_SCANCODE_V cannot be simply assigned here: on a non-QWERTY layout (e.g. Dvorak)
+    // it may be mapped to an incorrect key 
     case 'V': return SDL_SCANCODE_VIRTUAL_v;
 
     default: return SDL_SCANCODE_UNKNOWN;
