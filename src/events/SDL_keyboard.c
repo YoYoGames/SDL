@@ -287,6 +287,7 @@ static const SDL_Keycode SDL_default_keymap[SDL_NUM_SCANCODES] = {
     SDLK_SOFTRIGHT,
     SDLK_CALL,
     SDLK_ENDCALL,
+    SDLK_VIRTUAL_v,
 };
 
 static const char *SDL_scancode_names[SDL_NUM_SCANCODES] = {
@@ -527,6 +528,7 @@ static const char *SDL_scancode_names[SDL_NUM_SCANCODES] = {
     "SoftRight",
     "Call",
     "EndCall",
+    "V"
 };
 
 /* Taken from SDL_iconv() */
