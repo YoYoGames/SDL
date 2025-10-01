@@ -430,9 +430,6 @@ int Cocoa_GetDisplayDPI(_THIS, SDL_VideoDisplay * display, float * ddpi, float *
     /* we need the backingScaleFactor for Retina displays, which is only exposed through NSScreen, not CGDisplay, afaik, so find our screen... */
     CGFloat scaleFactor = 1.0f;
     NSArray *screens = [NSScreen screens];
-    NSSize displayNativeSize;
-    displayNativeSize.width = (int) CGDisplayPixelsWide(data->display);
-    displayNativeSize.height = (int) CGDisplayPixelsHigh(data->display);
 
     /* Sensible defaults */
     CGFloat windowsCompatibleDpiW = 96.0;
@@ -446,10 +443,18 @@ int Cocoa_GetDisplayDPI(_THIS, SDL_VideoDisplay * display, float * ddpi, float *
             /* Neither CGDisplayScreenSize(description's NSScreenNumber) nor [NSScreen backingScaleFactor] can calculate the correct dpi in macOS. E.g. backingScaleFactor is always 2 in all display modes for rMBP 16" */
             if (floor(NSAppKitVersionNumber) > NSAppKitVersionNumber10_7) {
                 NSRect framePoints = [screen frame];
+                NSRect framePixels = [screen convertRectToBacking:framePoints];
+
                 CGFloat widthPoints  = framePoints.size.width;
                 CGFloat heightPoints = framePoints.size.height;
-                windowsCompatibleDpiW = (displayNativeSize.width / framePoints.size.width) * 96.0;
-                windowsCompatibleDpiH = (displayNativeSize.height / framePoints.size.height) * 96.0;
+                CGFloat widthPixels  = framePixels.size.width;
+                CGFloat heightPixels = framePixels.size.height;
+
+                // SDL_Log ("widthPoints %f    heightPoints %f", widthPoints, heightPoints);
+                // SDL_Log ("widthPixels %f    heightPixels %f", widthPixels, heightPixels);
+
+                windowsCompatibleDpiW = (widthPixels / widthPoints) * 96.0;
+                windowsCompatibleDpiH = (heightPixels / heightPoints) * 96.0;
                 break;
             } else
 #endif
