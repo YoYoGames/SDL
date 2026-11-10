@@ -2182,7 +2182,7 @@ int Cocoa_SetWindowGammaRamp(_THIS, SDL_Window * window, const Uint16 * ramp)
 {
     SDL_VideoDisplay *display = SDL_GetDisplayForWindow(window);
     CGDirectDisplayID display_id = ((SDL_DisplayData *)display->driverdata)->display;
-    const uint32_t tableSize = 256;
+    enum { tableSize = 256 }; /* YoYo: a constant expression, so newer clang doesn't reject the arrays below as VLAs (-Wgnu-folding-constant) */
     CGGammaValue redTable[tableSize];
     CGGammaValue greenTable[tableSize];
     CGGammaValue blueTable[tableSize];
@@ -2288,7 +2288,7 @@ int Cocoa_GetWindowGammaRamp(_THIS, SDL_Window * window, Uint16 * ramp)
 {
     SDL_VideoDisplay *display = SDL_GetDisplayForWindow(window);
     CGDirectDisplayID display_id = ((SDL_DisplayData *)display->driverdata)->display;
-    const uint32_t tableSize = 256;
+    enum { tableSize = 256 }; /* YoYo: a constant expression, so newer clang doesn't reject the arrays below as VLAs (-Wgnu-folding-constant) */
     CGGammaValue redTable[tableSize];
     CGGammaValue greenTable[tableSize];
     CGGammaValue blueTable[tableSize];
