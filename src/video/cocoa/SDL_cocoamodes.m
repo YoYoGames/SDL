@@ -328,30 +328,33 @@ static void Cocoa_GetDisplayIdentity(CGDirectDisplayID displayid, SDL_DisplayDat
 
 static void Cocoa_RememberDisplayID(SDL_DisplayData *data, CGDirectDisplayID displayid, const char *how)
 {
-    SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "Cocoa: display %u is now %u (matched by %s)",
+    /* the application category: it's the one logged by default (video is critical-only), so a run on the affected
+       hardware shows this without the app raising priorities. macOS: stderr and the unified log (Console.app). */
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Cocoa: display %u is now %u (matched by %s)",
                 (unsigned int) data->display, (unsigned int) displayid, how);
     data->display = displayid;
 }
 
-SDL_bool Cocoa_DisplayMatchesID(SDL_DisplayData *data, CGDirectDisplayID displayid)
+static SDL_bool Cocoa_MatchesUUID(const SDL_DisplayData *data, const SDL_DisplayData *other)
 {
-    SDL_DisplayData other;
+    return data->has_uuid && other->has_uuid && SDL_memcmp(&other->uuid, &data->uuid, sizeof(other->uuid)) == 0;
+}
 
-    if (data->display == displayid) {
-        return SDL_TRUE;
-    }
+/* Only for a display whose own ID matches no screen, against a screen no SDL display has: EDID serials aren't
+   guaranteed unique, so two identical monitors could otherwise swap or share IDs. */
+static SDL_bool Cocoa_MatchesHardware(const SDL_DisplayData *data, const SDL_DisplayData *other)
+{
+    return (data->serial != 0 || data->builtin) &&
+           other->vendor == data->vendor && other->model == data->model && other->serial == data->serial &&
+           other->builtin == data->builtin;
+}
 
-    Cocoa_GetDisplayIdentity(displayid, &other);
-    if (data->has_uuid && other.has_uuid && SDL_memcmp(&other.uuid, &data->uuid, sizeof(other.uuid)) == 0) {
-        Cocoa_RememberDisplayID(data, displayid, "UUID");
-        return SDL_TRUE;
-    }
-    /* a serial number (or being the built-in display) is needed to tell two identical monitors apart */
-    if ((data->serial != 0 || data->builtin) &&
-        other.vendor == data->vendor && other.model == data->model && other.serial == data->serial &&
-        other.builtin == data->builtin) {
-        Cocoa_RememberDisplayID(data, displayid, "vendor, model and serial number");
-        return SDL_TRUE;
+static SDL_bool Cocoa_IDHasScreen(CGDirectDisplayID displayid, NSArray *screens)
+{
+    for (NSScreen *screen in screens) {
+        if (Cocoa_GetScreenDisplayID(screen) == displayid) {
+            return SDL_TRUE;
+        }
     }
     return SDL_FALSE;
 }
@@ -409,21 +412,73 @@ static NSScreen *Cocoa_PairUnmatchedScreen(SDL_DisplayData *data, NSArray *scree
 
 NSScreen *Cocoa_GetScreenForDisplay(SDL_DisplayData *data)
 {
+    SDL_VideoDevice *_this = SDL_GetVideoDevice();
     NSArray *screens = [NSScreen screens];
+    SDL_DisplayData other;
 
     for (NSScreen *screen in screens) {
         if (Cocoa_GetScreenDisplayID(screen) == data->display) {
             return screen;
         }
     }
-    /* the cached ID is stale */
+    /* the cached ID is stale: the UUID against every screen first */
     for (NSScreen *screen in screens) {
-        if (Cocoa_DisplayMatchesID(data, Cocoa_GetScreenDisplayID(screen))) {
+        Cocoa_GetDisplayIdentity(Cocoa_GetScreenDisplayID(screen), &other);
+        if (Cocoa_MatchesUUID(data, &other)) {
+            Cocoa_RememberDisplayID(data, Cocoa_GetScreenDisplayID(screen), "UUID");
+            return screen;
+        }
+    }
+    /* then the hardware identity, only against screens no SDL display has */
+    for (NSScreen *screen in screens) {
+        const CGDirectDisplayID screenid = Cocoa_GetScreenDisplayID(screen);
+        if (_this != NULL && Cocoa_ScreenHasDisplay(_this, screenid)) {
+            continue;
+        }
+        Cocoa_GetDisplayIdentity(screenid, &other);
+        if (Cocoa_MatchesHardware(data, &other)) {
+            Cocoa_RememberDisplayID(data, screenid, "vendor, model and serial number");
             return screen;
         }
     }
     return Cocoa_PairUnmatchedScreen(data, screens);
 }
+
+int Cocoa_FindDisplayIndexForScreen(_THIS, CGDirectDisplayID displayid)
+{ @autoreleasepool
+{
+    NSArray *screens = nil;
+    SDL_DisplayData other;
+    int i;
+
+    for (i = 0; i < _this->num_displays; ++i) {
+        SDL_DisplayData *displaydata = (SDL_DisplayData *) _this->displays[i].driverdata;
+        if (displaydata != NULL && displaydata->display == displayid) {
+            return i;
+        }
+    }
+
+    /* no SDL display has this ID, so it's unclaimed: the UUID first, against every display */
+    Cocoa_GetDisplayIdentity(displayid, &other);
+    for (i = 0; i < _this->num_displays; ++i) {
+        SDL_DisplayData *displaydata = (SDL_DisplayData *) _this->displays[i].driverdata;
+        if (displaydata != NULL && Cocoa_MatchesUUID(displaydata, &other)) {
+            Cocoa_RememberDisplayID(displaydata, displayid, "UUID");
+            return i;
+        }
+    }
+    /* then the hardware identity, only for displays whose own ID matches no screen */
+    screens = [NSScreen screens];
+    for (i = 0; i < _this->num_displays; ++i) {
+        SDL_DisplayData *displaydata = (SDL_DisplayData *) _this->displays[i].driverdata;
+        if (displaydata != NULL && !Cocoa_IDHasScreen(displaydata->display, screens) &&
+            Cocoa_MatchesHardware(displaydata, &other)) {
+            Cocoa_RememberDisplayID(displaydata, displayid, "vendor, model and serial number");
+            return i;
+        }
+    }
+    return -1;
+}}
 
 void Cocoa_InitModes(_THIS)
 { @autoreleasepool

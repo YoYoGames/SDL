@@ -2262,18 +2262,10 @@ int Cocoa_GetWindowDisplayIndex(_THIS, SDL_Window * window)
         /* https://developer.apple.com/documentation/appkit/nsscreen/1388360-devicedescription?language=objc */
         displayid = [[screen.deviceDescription objectForKey:@"NSScreenNumber"] unsignedIntValue];
 
-        for (i = 0; i < _this->num_displays; i++) {
-            SDL_DisplayData *displaydata = (SDL_DisplayData *)_this->displays[i].driverdata;
-            if (displaydata != NULL && displaydata->display == displayid) {
-                return i;
-            }
-        }
-        /* YoYo: a display's ID can change (e.g. on a GPU switch); match its UUID and remember the new ID */
-        for (i = 0; i < _this->num_displays; i++) {
-            SDL_DisplayData *displaydata = (SDL_DisplayData *)_this->displays[i].driverdata;
-            if (displaydata != NULL && Cocoa_DisplayMatchesID(displaydata, displayid)) {
-                return i;
-            }
+        /* YoYo: also finds a display whose ID has changed (e.g. on a GPU switch) and remembers the new ID */
+        i = Cocoa_FindDisplayIndexForScreen(_this, displayid);
+        if (i >= 0) {
+            return i;
         }
     }
 

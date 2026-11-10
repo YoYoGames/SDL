@@ -28,7 +28,7 @@ typedef struct
     CGDirectDisplayID display;
     /* YoYo: a display's CGDirectDisplayID can change while the app runs (e.g. when a MacBook Pro with two GPUs
        switches between them) and SDL 2.28 never re-enumerates displays, so keep its UUID, which doesn't change,
-       to find it again. See Cocoa_DisplayMatchesID. */
+       to find it again. See Cocoa_GetScreenForDisplay. */
     CFUUIDBytes uuid;
     SDL_bool has_uuid;
     /* YoYo: the display's hardware identity, in case its UUID changes too */
@@ -38,8 +38,9 @@ typedef struct
     SDL_bool builtin;
 } SDL_DisplayData;
 
-/* YoYo: SDL_TRUE if displayid is this display, updating the cached ID when the display's ID has changed */
-extern SDL_bool Cocoa_DisplayMatchesID(SDL_DisplayData *data, CGDirectDisplayID displayid);
+/* YoYo: the index of the SDL display a screen's ID belongs to (-1 if none), updating a display's cached ID when it
+   has changed */
+extern int Cocoa_FindDisplayIndexForScreen(_THIS, CGDirectDisplayID displayid);
 /* YoYo: the display's NSScreen (nil if it has none), updating the cached ID when the display's ID has changed */
 extern NSScreen *Cocoa_GetScreenForDisplay(SDL_DisplayData *data);
 
