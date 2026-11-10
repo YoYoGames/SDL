@@ -312,19 +312,99 @@ static CGDirectDisplayID Cocoa_GetScreenDisplayID(NSScreen *screen)
 /* YoYo (GameMaker-Bugs#16387): on an Intel Mac with two GPUs the built-in display's CGDirectDisplayID can change
    when macOS switches GPU. SDL 2.28 enumerates displays once, so the cached ID then matched no NSScreen:
    Cocoa_GetDisplayDPI returned its 96 DPI default (1x on a Retina screen), and display bounds and a window's display
-   index were wrong too. Match on the display's UUID as well, which survives the change, and remember the new ID. */
+   index were wrong too. When the cached ID matches nothing, find the display again and remember its new ID:
+     1. by UUID, which should survive the change;
+     2. by hardware identity (vendor, model, serial, built-in), in case the UUID changes too;
+     3. as a last resort, by pairing the one SDL display that has no screen with the one screen no SDL display has. */
+
+static void Cocoa_GetDisplayIdentity(CGDirectDisplayID displayid, SDL_DisplayData *identity)
+{
+    identity->has_uuid = Cocoa_GetDisplayUUID(displayid, &identity->uuid);
+    identity->vendor = CGDisplayVendorNumber(displayid);
+    identity->model = CGDisplayModelNumber(displayid);
+    identity->serial = CGDisplaySerialNumber(displayid);
+    identity->builtin = CGDisplayIsBuiltin(displayid) ? SDL_TRUE : SDL_FALSE;
+}
+
+static void Cocoa_RememberDisplayID(SDL_DisplayData *data, CGDirectDisplayID displayid, const char *how)
+{
+    SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "Cocoa: display %u is now %u (matched by %s)",
+                (unsigned int) data->display, (unsigned int) displayid, how);
+    data->display = displayid;
+}
+
 SDL_bool Cocoa_DisplayMatchesID(SDL_DisplayData *data, CGDirectDisplayID displayid)
 {
-    CFUUIDBytes uuid;
+    SDL_DisplayData other;
 
     if (data->display == displayid) {
         return SDL_TRUE;
     }
-    if (data->has_uuid && Cocoa_GetDisplayUUID(displayid, &uuid) && SDL_memcmp(&uuid, &data->uuid, sizeof(uuid)) == 0) {
-        data->display = displayid;
+
+    Cocoa_GetDisplayIdentity(displayid, &other);
+    if (data->has_uuid && other.has_uuid && SDL_memcmp(&other.uuid, &data->uuid, sizeof(other.uuid)) == 0) {
+        Cocoa_RememberDisplayID(data, displayid, "UUID");
+        return SDL_TRUE;
+    }
+    /* a serial number (or being the built-in display) is needed to tell two identical monitors apart */
+    if ((data->serial != 0 || data->builtin) &&
+        other.vendor == data->vendor && other.model == data->model && other.serial == data->serial &&
+        other.builtin == data->builtin) {
+        Cocoa_RememberDisplayID(data, displayid, "vendor, model and serial number");
         return SDL_TRUE;
     }
     return SDL_FALSE;
+}
+
+static SDL_bool Cocoa_ScreenHasDisplay(_THIS, CGDirectDisplayID screenid)
+{
+    int i;
+    for (i = 0; i < _this->num_displays; ++i) {
+        SDL_DisplayData *displaydata = (SDL_DisplayData *) _this->displays[i].driverdata;
+        if (displaydata != NULL && displaydata->display == screenid) {
+            return SDL_TRUE;
+        }
+    }
+    return SDL_FALSE;
+}
+
+/* the one screen no SDL display has, when data's display is the one SDL display with no screen */
+static NSScreen *Cocoa_PairUnmatchedScreen(SDL_DisplayData *data, NSArray *screens)
+{
+    SDL_VideoDevice *_this = SDL_GetVideoDevice();
+    NSScreen *unmatched = nil;
+    int unmatchedScreens = 0, unmatchedDisplays = 0, i;
+
+    if (_this == NULL) {
+        return nil;
+    }
+    for (NSScreen *screen in screens) {
+        if (!Cocoa_ScreenHasDisplay(_this, Cocoa_GetScreenDisplayID(screen))) {
+            unmatched = screen;
+            ++unmatchedScreens;
+        }
+    }
+    for (i = 0; i < _this->num_displays; ++i) {
+        SDL_DisplayData *displaydata = (SDL_DisplayData *) _this->displays[i].driverdata;
+        SDL_bool found = SDL_FALSE;
+        if (displaydata == NULL) {
+            continue;
+        }
+        for (NSScreen *screen in screens) {
+            if (Cocoa_GetScreenDisplayID(screen) == displaydata->display) {
+                found = SDL_TRUE;
+                break;
+            }
+        }
+        if (!found) {
+            ++unmatchedDisplays;
+        }
+    }
+    if (unmatchedScreens != 1 || unmatchedDisplays != 1) {
+        return nil;
+    }
+    Cocoa_RememberDisplayID(data, Cocoa_GetScreenDisplayID(unmatched), "elimination");
+    return unmatched;
 }
 
 NSScreen *Cocoa_GetScreenForDisplay(SDL_DisplayData *data)
@@ -336,13 +416,13 @@ NSScreen *Cocoa_GetScreenForDisplay(SDL_DisplayData *data)
             return screen;
         }
     }
-    /* the cached ID may be stale: try each screen's UUID */
+    /* the cached ID is stale */
     for (NSScreen *screen in screens) {
         if (Cocoa_DisplayMatchesID(data, Cocoa_GetScreenDisplayID(screen))) {
             return screen;
         }
     }
-    return nil;
+    return Cocoa_PairUnmatchedScreen(data, screens);
 }
 
 void Cocoa_InitModes(_THIS)
@@ -402,7 +482,7 @@ void Cocoa_InitModes(_THIS)
                 continue;
             }
             displaydata->display = displays[i];
-            displaydata->has_uuid = Cocoa_GetDisplayUUID(displays[i], &displaydata->uuid);
+            Cocoa_GetDisplayIdentity(displays[i], displaydata);
 
             CVDisplayLinkCreateWithCGDisplay(displays[i], &link);
 
@@ -431,20 +511,30 @@ void Cocoa_InitModes(_THIS)
 }}
 
 int Cocoa_GetDisplayBounds(_THIS, SDL_VideoDisplay * display, SDL_Rect * rect)
+{ @autoreleasepool
 {
     SDL_DisplayData *displaydata = (SDL_DisplayData *) display->driverdata;
     CGRect cgrect;
 
     (void) Cocoa_GetScreenForDisplay(displaydata); /* YoYo: updates a stale display ID */
     cgrect = CGDisplayBounds(displaydata->display);
+
+    /* YoYo: an ID that matches no display gives an empty rect. Report an error so SDL_GetDisplayBounds falls back to
+       the display mode's size, rather than 0x0 with success. (Checks the rect rather than the screen lookup, so a
+       display with a valid ID but no NSScreen still works.) */
+    if (CGRectIsEmpty(cgrect)) {
+        return SDL_SetError("Couldn't get the bounds of display %u", (unsigned int) displaydata->display);
+    }
+
     rect->x = (int)cgrect.origin.x;
     rect->y = (int)cgrect.origin.y;
     rect->w = (int)cgrect.size.width;
     rect->h = (int)cgrect.size.height;
     return 0;
-}
+}}
 
 int Cocoa_GetDisplayUsableBounds(_THIS, SDL_VideoDisplay * display, SDL_Rect * rect)
+{ @autoreleasepool
 {
     SDL_DisplayData *displaydata = (SDL_DisplayData *) display->driverdata;
     NSScreen *screen = Cocoa_GetScreenForDisplay(displaydata); /* YoYo: copes with a changed display ID */
@@ -462,7 +552,7 @@ int Cocoa_GetDisplayUsableBounds(_THIS, SDL_VideoDisplay * display, SDL_Rect * r
     }
 
     return 0;
-}
+}}
 
 int Cocoa_GetDisplayDPI(_THIS, SDL_VideoDisplay * display, float * ddpi, float * hdpi, float * vdpi)
 { @autoreleasepool
@@ -517,6 +607,10 @@ void Cocoa_GetDisplayModes(_THIS, SDL_VideoDisplay * display)
     SDL_DisplayMode desktopmode;
     CFArrayRef modes;
     CFDictionaryRef dict = NULL;
+
+    @autoreleasepool {
+        (void) Cocoa_GetScreenForDisplay(data); /* YoYo: updates a stale display ID */
+    }
 
     CVDisplayLinkCreateWithCGDisplay(data->display, &link);
 
@@ -613,6 +707,10 @@ int Cocoa_SetDisplayMode(_THIS, SDL_VideoDisplay * display, SDL_DisplayMode * mo
     SDL_DisplayModeData *data = (SDL_DisplayModeData *) mode->driverdata;
     CGDisplayFadeReservationToken fade_token = kCGDisplayFadeReservationInvalidToken;
     CGError result;
+
+    @autoreleasepool {
+        (void) Cocoa_GetScreenForDisplay(displaydata); /* YoYo: updates a stale display ID (Cocoa_QuitModes comes here too) */
+    }
 
     /* Fade to black to hide resolution-switching flicker */
     if (CGAcquireDisplayFadeReservation(5, &fade_token) == kCGErrorSuccess) {

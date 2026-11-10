@@ -31,6 +31,11 @@ typedef struct
        to find it again. See Cocoa_DisplayMatchesID. */
     CFUUIDBytes uuid;
     SDL_bool has_uuid;
+    /* YoYo: the display's hardware identity, in case its UUID changes too */
+    uint32_t vendor;
+    uint32_t model;
+    uint32_t serial;
+    SDL_bool builtin;
 } SDL_DisplayData;
 
 /* YoYo: SDL_TRUE if displayid is this display, updating the cached ID when the display's ID has changed */
