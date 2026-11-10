@@ -2268,6 +2268,13 @@ int Cocoa_GetWindowDisplayIndex(_THIS, SDL_Window * window)
                 return i;
             }
         }
+        /* YoYo: a display's ID can change (e.g. on a GPU switch); match its UUID and remember the new ID */
+        for (i = 0; i < _this->num_displays; i++) {
+            SDL_DisplayData *displaydata = (SDL_DisplayData *)_this->displays[i].driverdata;
+            if (displaydata != NULL && Cocoa_DisplayMatchesID(displaydata, displayid)) {
+                return i;
+            }
+        }
     }
 
     /* Other code may expect SDL_GetWindowDisplayIndex to always return a valid

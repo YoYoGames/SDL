@@ -293,6 +293,58 @@ static const char *Cocoa_GetDisplayName(CGDirectDisplayID displayID)
     return displayName;
 }
 
+static SDL_bool Cocoa_GetDisplayUUID(CGDirectDisplayID displayid, CFUUIDBytes *bytes)
+{
+    CFUUIDRef uuid = CGDisplayCreateUUIDFromDisplayID(displayid);
+    if (uuid == NULL) {
+        return SDL_FALSE;
+    }
+    *bytes = CFUUIDGetUUIDBytes(uuid);
+    CFRelease(uuid);
+    return SDL_TRUE;
+}
+
+static CGDirectDisplayID Cocoa_GetScreenDisplayID(NSScreen *screen)
+{
+    return (CGDirectDisplayID) [[[screen deviceDescription] objectForKey:@"NSScreenNumber"] unsignedIntValue];
+}
+
+/* YoYo (GameMaker-Bugs#16387): on an Intel Mac with two GPUs the built-in display's CGDirectDisplayID can change
+   when macOS switches GPU. SDL 2.28 enumerates displays once, so the cached ID then matched no NSScreen:
+   Cocoa_GetDisplayDPI returned its 96 DPI default (1x on a Retina screen), and display bounds and a window's display
+   index were wrong too. Match on the display's UUID as well, which survives the change, and remember the new ID. */
+SDL_bool Cocoa_DisplayMatchesID(SDL_DisplayData *data, CGDirectDisplayID displayid)
+{
+    CFUUIDBytes uuid;
+
+    if (data->display == displayid) {
+        return SDL_TRUE;
+    }
+    if (data->has_uuid && Cocoa_GetDisplayUUID(displayid, &uuid) && SDL_memcmp(&uuid, &data->uuid, sizeof(uuid)) == 0) {
+        data->display = displayid;
+        return SDL_TRUE;
+    }
+    return SDL_FALSE;
+}
+
+NSScreen *Cocoa_GetScreenForDisplay(SDL_DisplayData *data)
+{
+    NSArray *screens = [NSScreen screens];
+
+    for (NSScreen *screen in screens) {
+        if (Cocoa_GetScreenDisplayID(screen) == data->display) {
+            return screen;
+        }
+    }
+    /* the cached ID may be stale: try each screen's UUID */
+    for (NSScreen *screen in screens) {
+        if (Cocoa_DisplayMatchesID(data, Cocoa_GetScreenDisplayID(screen))) {
+            return screen;
+        }
+    }
+    return nil;
+}
+
 void Cocoa_InitModes(_THIS)
 { @autoreleasepool
 {
@@ -350,6 +402,7 @@ void Cocoa_InitModes(_THIS)
                 continue;
             }
             displaydata->display = displays[i];
+            displaydata->has_uuid = Cocoa_GetDisplayUUID(displays[i], &displaydata->uuid);
 
             CVDisplayLinkCreateWithCGDisplay(displays[i], &link);
 
@@ -382,6 +435,7 @@ int Cocoa_GetDisplayBounds(_THIS, SDL_VideoDisplay * display, SDL_Rect * rect)
     SDL_DisplayData *displaydata = (SDL_DisplayData *) display->driverdata;
     CGRect cgrect;
 
+    (void) Cocoa_GetScreenForDisplay(displaydata); /* YoYo: updates a stale display ID */
     cgrect = CGDisplayBounds(displaydata->display);
     rect->x = (int)cgrect.origin.x;
     rect->y = (int)cgrect.origin.y;
@@ -393,22 +447,10 @@ int Cocoa_GetDisplayBounds(_THIS, SDL_VideoDisplay * display, SDL_Rect * rect)
 int Cocoa_GetDisplayUsableBounds(_THIS, SDL_VideoDisplay * display, SDL_Rect * rect)
 {
     SDL_DisplayData *displaydata = (SDL_DisplayData *) display->driverdata;
-    const CGDirectDisplayID cgdisplay = displaydata->display;
-    NSArray *screens = [NSScreen screens];
-    NSScreen *screen = nil;
+    NSScreen *screen = Cocoa_GetScreenForDisplay(displaydata); /* YoYo: copes with a changed display ID */
 
-    /* !!! FIXME: maybe track the NSScreen in SDL_DisplayData? */
-    for (NSScreen *i in screens) {
-        const CGDirectDisplayID thisDisplay = (CGDirectDisplayID) [[[i deviceDescription] objectForKey:@"NSScreenNumber"] unsignedIntValue];
-        if (thisDisplay == cgdisplay) {
-            screen = i;
-            break;
-        }
-    }
-
-    SDL_assert(screen != nil);  /* didn't find it?! */
     if (screen == nil) {
-        return -1;
+        return SDL_SetError("Couldn't find the screen for display %u", (unsigned int) displaydata->display);
     }
 
     {
@@ -428,44 +470,31 @@ int Cocoa_GetDisplayDPI(_THIS, SDL_VideoDisplay * display, float * ddpi, float *
     SDL_DisplayData *data = (SDL_DisplayData *) display->driverdata;
 
     /* we need the backingScaleFactor for Retina displays, which is only exposed through NSScreen, not CGDisplay, afaik, so find our screen... */
-    CGFloat scaleFactor = 1.0f;
-    NSArray *screens = [NSScreen screens];
+    NSScreen *screen = Cocoa_GetScreenForDisplay(data); /* YoYo: copes with a changed display ID */
+    CGFloat windowsCompatibleDpiW;
+    CGFloat windowsCompatibleDpiH;
 
-    /* Sensible defaults */
-    CGFloat windowsCompatibleDpiW = 96.0;
-    CGFloat windowsCompatibleDpiH = 96.0;
+    /* YoYo (GameMaker-Bugs#16387): this used to return 96 (1x) with success when no screen matched, which the IDE
+       couldn't tell from a real 1x display. Report it as an error instead. */
+    if (screen == nil) {
+        return SDL_SetError("Couldn't find the screen for display %u", (unsigned int) data->display);
+    }
 
-    for (NSScreen *screen in screens) {
-        const CGDirectDisplayID dpyid = (const CGDirectDisplayID ) [[[screen deviceDescription] objectForKey:@"NSScreenNumber"] unsignedIntValue];
-        if (dpyid == data->display) {
 #ifdef MAC_OS_X_VERSION_10_8
+    /* Neither CGDisplayScreenSize(description's NSScreenNumber) nor [NSScreen backingScaleFactor] can calculate the correct dpi in macOS. E.g. backingScaleFactor is always 2 in all display modes for rMBP 16" */
+    if (floor(NSAppKitVersionNumber) > NSAppKitVersionNumber10_7) {
+        NSRect framePoints = [screen frame];
+        NSRect framePixels = [screen convertRectToBacking:framePoints];
 
-            /* Neither CGDisplayScreenSize(description's NSScreenNumber) nor [NSScreen backingScaleFactor] can calculate the correct dpi in macOS. E.g. backingScaleFactor is always 2 in all display modes for rMBP 16" */
-            if (floor(NSAppKitVersionNumber) > NSAppKitVersionNumber10_7) {
-                NSRect framePoints = [screen frame];
-                NSRect framePixels = [screen convertRectToBacking:framePoints];
-
-                CGFloat widthPoints  = framePoints.size.width;
-                CGFloat heightPoints = framePoints.size.height;
-                CGFloat widthPixels  = framePixels.size.width;
-                CGFloat heightPixels = framePixels.size.height;
-
-                // SDL_Log ("widthPoints %f    heightPoints %f", widthPoints, heightPoints);
-                // SDL_Log ("widthPixels %f    heightPixels %f", widthPixels, heightPixels);
-
-                windowsCompatibleDpiW = (widthPixels / widthPoints) * 96.0;
-                windowsCompatibleDpiH = (heightPixels / heightPoints) * 96.0;
-                break;
-            } else
+        windowsCompatibleDpiW = (framePixels.size.width / framePoints.size.width) * 96.0;
+        windowsCompatibleDpiH = (framePixels.size.height / framePoints.size.height) * 96.0;
+    } else
 #endif
-            {
-                // fallback for 10.7
-                scaleFactor = [screen backingScaleFactor];
-                windowsCompatibleDpiW = scaleFactor * 96.0;
-                windowsCompatibleDpiH = scaleFactor * 96.0;
-                break;
-            }
-        }
+    {
+        // fallback for 10.7
+        CGFloat scaleFactor = [screen backingScaleFactor];
+        windowsCompatibleDpiW = scaleFactor * 96.0;
+        windowsCompatibleDpiH = scaleFactor * 96.0;
     }
 
     if (ddpi)
