@@ -2182,7 +2182,7 @@ int Cocoa_SetWindowGammaRamp(_THIS, SDL_Window * window, const Uint16 * ramp)
 {
     SDL_VideoDisplay *display = SDL_GetDisplayForWindow(window);
     CGDirectDisplayID display_id = ((SDL_DisplayData *)display->driverdata)->display;
-    const uint32_t tableSize = 256;
+    enum { tableSize = 256 }; /* YoYo: a constant expression, so newer clang doesn't reject the arrays below as VLAs (-Wgnu-folding-constant) */
     CGGammaValue redTable[tableSize];
     CGGammaValue greenTable[tableSize];
     CGGammaValue blueTable[tableSize];
@@ -2262,11 +2262,10 @@ int Cocoa_GetWindowDisplayIndex(_THIS, SDL_Window * window)
         /* https://developer.apple.com/documentation/appkit/nsscreen/1388360-devicedescription?language=objc */
         displayid = [[screen.deviceDescription objectForKey:@"NSScreenNumber"] unsignedIntValue];
 
-        for (i = 0; i < _this->num_displays; i++) {
-            SDL_DisplayData *displaydata = (SDL_DisplayData *)_this->displays[i].driverdata;
-            if (displaydata != NULL && displaydata->display == displayid) {
-                return i;
-            }
+        /* YoYo: also finds a display whose ID has changed (e.g. on a GPU switch) and remembers the new ID */
+        i = Cocoa_FindDisplayIndexForScreen(_this, displayid);
+        if (i >= 0) {
+            return i;
         }
     }
 
@@ -2281,7 +2280,7 @@ int Cocoa_GetWindowGammaRamp(_THIS, SDL_Window * window, Uint16 * ramp)
 {
     SDL_VideoDisplay *display = SDL_GetDisplayForWindow(window);
     CGDirectDisplayID display_id = ((SDL_DisplayData *)display->driverdata)->display;
-    const uint32_t tableSize = 256;
+    enum { tableSize = 256 }; /* YoYo: a constant expression, so newer clang doesn't reject the arrays below as VLAs (-Wgnu-folding-constant) */
     CGGammaValue redTable[tableSize];
     CGGammaValue greenTable[tableSize];
     CGGammaValue blueTable[tableSize];

@@ -293,6 +293,226 @@ static const char *Cocoa_GetDisplayName(CGDirectDisplayID displayID)
     return displayName;
 }
 
+static SDL_bool Cocoa_GetDisplayUUID(CGDirectDisplayID displayid, CFUUIDBytes *bytes)
+{
+    CFUUIDRef uuid = CGDisplayCreateUUIDFromDisplayID(displayid);
+    if (uuid == NULL) {
+        return SDL_FALSE;
+    }
+    *bytes = CFUUIDGetUUIDBytes(uuid);
+    CFRelease(uuid);
+    return SDL_TRUE;
+}
+
+static CGDirectDisplayID Cocoa_GetScreenDisplayID(NSScreen *screen)
+{
+    return (CGDirectDisplayID) [[[screen deviceDescription] objectForKey:@"NSScreenNumber"] unsignedIntValue];
+}
+
+/* YoYo (GameMaker-Bugs#16387): on an Intel Mac with two GPUs the built-in display's CGDirectDisplayID can change
+   when macOS switches GPU. SDL 2.28 enumerates displays once, so the cached ID then matched no NSScreen:
+   Cocoa_GetDisplayDPI returned its 96 DPI default (1x on a Retina screen), and display bounds and a window's display
+   index were wrong too. When the cached ID matches nothing, find the display again and remember its new ID:
+     1. by UUID, which should survive the change;
+     2. by hardware identity (vendor, model, serial, built-in), in case the UUID changes too;
+     3. as a last resort, by pairing the one SDL display that has no screen with the one screen no SDL display has. */
+
+static void Cocoa_GetDisplayIdentity(CGDirectDisplayID displayid, SDL_DisplayData *identity)
+{
+    identity->has_uuid = Cocoa_GetDisplayUUID(displayid, &identity->uuid);
+    identity->vendor = CGDisplayVendorNumber(displayid);
+    identity->model = CGDisplayModelNumber(displayid);
+    identity->serial = CGDisplaySerialNumber(displayid);
+    identity->builtin = CGDisplayIsBuiltin(displayid) ? SDL_TRUE : SDL_FALSE;
+}
+
+static void Cocoa_RememberDisplayID(SDL_DisplayData *data, CGDirectDisplayID displayid, const char *how)
+{
+    /* the application category: it's the one logged by default (video is critical-only), so a run on the affected
+       hardware shows this without the app raising priorities. It goes to stderr only - it didn't appear in Console.app
+       or `log show --info` when tested - so start the app from Terminal to see it. */
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Cocoa: display %u is now %u (matched by %s)",
+                (unsigned int) data->display, (unsigned int) displayid, how);
+    data->display = displayid;
+}
+
+static SDL_bool Cocoa_MatchesUUID(const SDL_DisplayData *data, const SDL_DisplayData *other)
+{
+    return data->has_uuid && other->has_uuid && SDL_memcmp(&other->uuid, &data->uuid, sizeof(other->uuid)) == 0;
+}
+
+/* Only for a display whose own ID matches no screen, against a screen no SDL display has: EDID serials aren't
+   guaranteed unique, so two identical monitors could otherwise swap or share IDs. */
+static SDL_bool Cocoa_MatchesHardware(const SDL_DisplayData *data, const SDL_DisplayData *other)
+{
+    return (data->serial != 0 || data->builtin) &&
+           other->vendor == data->vendor && other->model == data->model && other->serial == data->serial &&
+           other->builtin == data->builtin;
+}
+
+static SDL_bool Cocoa_IDHasScreen(CGDirectDisplayID displayid, NSArray *screens)
+{
+    for (NSScreen *screen in screens) {
+        if (Cocoa_GetScreenDisplayID(screen) == displayid) {
+            return SDL_TRUE;
+        }
+    }
+    return SDL_FALSE;
+}
+
+static SDL_bool Cocoa_ScreenHasDisplay(_THIS, CGDirectDisplayID screenid)
+{
+    int i;
+    for (i = 0; i < _this->num_displays; ++i) {
+        SDL_DisplayData *displaydata = (SDL_DisplayData *) _this->displays[i].driverdata;
+        if (displaydata != NULL && displaydata->display == screenid) {
+            return SDL_TRUE;
+        }
+    }
+    return SDL_FALSE;
+}
+
+/* Accept a hardware-identity match only when it's unambiguous: this is the only unclaimed screen and the only SDL
+   display whose own ID matches no screen with that identity. Two identical monitors that both went stale would
+   otherwise be guessed between (and could swap); refusing leaves it to elimination, which also refuses, so callers get
+   an error rather than a wrong display. */
+static SDL_bool Cocoa_HardwareMatchIsUnique(_THIS, const SDL_DisplayData *identity, NSArray *screens)
+{
+    SDL_DisplayData other;
+    int screensMatching = 0, displaysMatching = 0, i;
+
+    for (NSScreen *screen in screens) {
+        const CGDirectDisplayID screenid = Cocoa_GetScreenDisplayID(screen);
+        if (Cocoa_ScreenHasDisplay(_this, screenid)) {
+            continue;
+        }
+        Cocoa_GetDisplayIdentity(screenid, &other);
+        if (Cocoa_MatchesHardware(identity, &other)) {
+            ++screensMatching;
+        }
+    }
+    for (i = 0; i < _this->num_displays; ++i) {
+        const SDL_DisplayData *displaydata = (const SDL_DisplayData *) _this->displays[i].driverdata;
+        if (displaydata == NULL || Cocoa_IDHasScreen(displaydata->display, screens)) {
+            continue;
+        }
+        if (displaydata->vendor == identity->vendor && displaydata->model == identity->model &&
+            displaydata->serial == identity->serial && displaydata->builtin == identity->builtin) {
+            ++displaysMatching;
+        }
+    }
+    return screensMatching == 1 && displaysMatching == 1;
+}
+
+/* the one screen no SDL display has, when data's display is the one SDL display with no screen */
+static NSScreen *Cocoa_PairUnmatchedScreen(SDL_DisplayData *data, NSArray *screens)
+{
+    SDL_VideoDevice *_this = SDL_GetVideoDevice();
+    NSScreen *unmatched = nil;
+    int unmatchedScreens = 0, unmatchedDisplays = 0, i;
+
+    if (_this == NULL) {
+        return nil;
+    }
+    for (NSScreen *screen in screens) {
+        if (!Cocoa_ScreenHasDisplay(_this, Cocoa_GetScreenDisplayID(screen))) {
+            unmatched = screen;
+            ++unmatchedScreens;
+        }
+    }
+    for (i = 0; i < _this->num_displays; ++i) {
+        SDL_DisplayData *displaydata = (SDL_DisplayData *) _this->displays[i].driverdata;
+        SDL_bool found = SDL_FALSE;
+        if (displaydata == NULL) {
+            continue;
+        }
+        for (NSScreen *screen in screens) {
+            if (Cocoa_GetScreenDisplayID(screen) == displaydata->display) {
+                found = SDL_TRUE;
+                break;
+            }
+        }
+        if (!found) {
+            ++unmatchedDisplays;
+        }
+    }
+    if (unmatchedScreens != 1 || unmatchedDisplays != 1) {
+        return nil;
+    }
+    Cocoa_RememberDisplayID(data, Cocoa_GetScreenDisplayID(unmatched), "elimination");
+    return unmatched;
+}
+
+NSScreen *Cocoa_GetScreenForDisplay(SDL_DisplayData *data)
+{
+    SDL_VideoDevice *_this = SDL_GetVideoDevice();
+    NSArray *screens = [NSScreen screens];
+    SDL_DisplayData other;
+
+    for (NSScreen *screen in screens) {
+        if (Cocoa_GetScreenDisplayID(screen) == data->display) {
+            return screen;
+        }
+    }
+    /* the cached ID is stale: the UUID against every screen first */
+    for (NSScreen *screen in screens) {
+        Cocoa_GetDisplayIdentity(Cocoa_GetScreenDisplayID(screen), &other);
+        if (Cocoa_MatchesUUID(data, &other)) {
+            Cocoa_RememberDisplayID(data, Cocoa_GetScreenDisplayID(screen), "UUID");
+            return screen;
+        }
+    }
+    /* then the hardware identity, only against screens no SDL display has, and only when unambiguous */
+    for (NSScreen *screen in screens) {
+        const CGDirectDisplayID screenid = Cocoa_GetScreenDisplayID(screen);
+        if (_this == NULL || Cocoa_ScreenHasDisplay(_this, screenid)) {
+            continue;
+        }
+        Cocoa_GetDisplayIdentity(screenid, &other);
+        if (Cocoa_MatchesHardware(data, &other) && Cocoa_HardwareMatchIsUnique(_this, data, screens)) {
+            Cocoa_RememberDisplayID(data, screenid, "vendor, model and serial number");
+            return screen;
+        }
+    }
+    return Cocoa_PairUnmatchedScreen(data, screens);
+}
+
+int Cocoa_FindDisplayIndexForScreen(_THIS, CGDirectDisplayID displayid)
+{ @autoreleasepool
+{
+    NSArray *screens = nil;
+    SDL_DisplayData other;
+    int i;
+
+    for (i = 0; i < _this->num_displays; ++i) {
+        SDL_DisplayData *displaydata = (SDL_DisplayData *) _this->displays[i].driverdata;
+        if (displaydata != NULL && displaydata->display == displayid) {
+            return i;
+        }
+    }
+
+    /* no SDL display has this ID, so it's unclaimed: the UUID first, against every display */
+    Cocoa_GetDisplayIdentity(displayid, &other);
+    for (i = 0; i < _this->num_displays; ++i) {
+        SDL_DisplayData *displaydata = (SDL_DisplayData *) _this->displays[i].driverdata;
+        if (displaydata != NULL && Cocoa_MatchesUUID(displaydata, &other)) {
+            Cocoa_RememberDisplayID(displaydata, displayid, "UUID");
+            return i;
+        }
+    }
+    /* then the hardware identity, only for displays whose own ID matches no screen, and only when unambiguous */
+    screens = [NSScreen screens];
+    for (i = 0; i < _this->num_displays; ++i) {
+        SDL_DisplayData *displaydata = (SDL_DisplayData *) _this->displays[i].driverdata;
+        if (displaydata != NULL && !Cocoa_IDHasScreen(displaydata->display, screens) &&
+            Cocoa_MatchesHardware(displaydata, &other) && Cocoa_HardwareMatchIsUnique(_this, displaydata, screens)) {
+            Cocoa_RememberDisplayID(displaydata, displayid, "vendor, model and serial number");
+            return i;
+        }
+    }
+    return -1;
+}}
+
 void Cocoa_InitModes(_THIS)
 { @autoreleasepool
 {
@@ -350,6 +570,7 @@ void Cocoa_InitModes(_THIS)
                 continue;
             }
             displaydata->display = displays[i];
+            Cocoa_GetDisplayIdentity(displays[i], displaydata);
 
             CVDisplayLinkCreateWithCGDisplay(displays[i], &link);
 
@@ -378,37 +599,36 @@ void Cocoa_InitModes(_THIS)
 }}
 
 int Cocoa_GetDisplayBounds(_THIS, SDL_VideoDisplay * display, SDL_Rect * rect)
+{ @autoreleasepool
 {
     SDL_DisplayData *displaydata = (SDL_DisplayData *) display->driverdata;
     CGRect cgrect;
 
+    (void) Cocoa_GetScreenForDisplay(displaydata); /* YoYo: updates a stale display ID */
     cgrect = CGDisplayBounds(displaydata->display);
+
+    /* YoYo: an ID that matches no display gives an empty rect. Report an error so SDL_GetDisplayBounds falls back to
+       the display mode's size, rather than 0x0 with success. (Checks the rect rather than the screen lookup, so a
+       display with a valid ID but no NSScreen still works.) */
+    if (CGRectIsEmpty(cgrect)) {
+        return SDL_SetError("Couldn't get the bounds of display %u", (unsigned int) displaydata->display);
+    }
+
     rect->x = (int)cgrect.origin.x;
     rect->y = (int)cgrect.origin.y;
     rect->w = (int)cgrect.size.width;
     rect->h = (int)cgrect.size.height;
     return 0;
-}
+}}
 
 int Cocoa_GetDisplayUsableBounds(_THIS, SDL_VideoDisplay * display, SDL_Rect * rect)
+{ @autoreleasepool
 {
     SDL_DisplayData *displaydata = (SDL_DisplayData *) display->driverdata;
-    const CGDirectDisplayID cgdisplay = displaydata->display;
-    NSArray *screens = [NSScreen screens];
-    NSScreen *screen = nil;
+    NSScreen *screen = Cocoa_GetScreenForDisplay(displaydata); /* YoYo: copes with a changed display ID */
 
-    /* !!! FIXME: maybe track the NSScreen in SDL_DisplayData? */
-    for (NSScreen *i in screens) {
-        const CGDirectDisplayID thisDisplay = (CGDirectDisplayID) [[[i deviceDescription] objectForKey:@"NSScreenNumber"] unsignedIntValue];
-        if (thisDisplay == cgdisplay) {
-            screen = i;
-            break;
-        }
-    }
-
-    SDL_assert(screen != nil);  /* didn't find it?! */
     if (screen == nil) {
-        return -1;
+        return SDL_SetError("Couldn't find the screen for display %u", (unsigned int) displaydata->display);
     }
 
     {
@@ -420,7 +640,7 @@ int Cocoa_GetDisplayUsableBounds(_THIS, SDL_VideoDisplay * display, SDL_Rect * r
     }
 
     return 0;
-}
+}}
 
 int Cocoa_GetDisplayDPI(_THIS, SDL_VideoDisplay * display, float * ddpi, float * hdpi, float * vdpi)
 { @autoreleasepool
@@ -428,44 +648,31 @@ int Cocoa_GetDisplayDPI(_THIS, SDL_VideoDisplay * display, float * ddpi, float *
     SDL_DisplayData *data = (SDL_DisplayData *) display->driverdata;
 
     /* we need the backingScaleFactor for Retina displays, which is only exposed through NSScreen, not CGDisplay, afaik, so find our screen... */
-    CGFloat scaleFactor = 1.0f;
-    NSArray *screens = [NSScreen screens];
+    NSScreen *screen = Cocoa_GetScreenForDisplay(data); /* YoYo: copes with a changed display ID */
+    CGFloat windowsCompatibleDpiW;
+    CGFloat windowsCompatibleDpiH;
 
-    /* Sensible defaults */
-    CGFloat windowsCompatibleDpiW = 96.0;
-    CGFloat windowsCompatibleDpiH = 96.0;
+    /* YoYo (GameMaker-Bugs#16387): this used to return 96 (1x) with success when no screen matched, which the IDE
+       couldn't tell from a real 1x display. Report it as an error instead. */
+    if (screen == nil) {
+        return SDL_SetError("Couldn't find the screen for display %u", (unsigned int) data->display);
+    }
 
-    for (NSScreen *screen in screens) {
-        const CGDirectDisplayID dpyid = (const CGDirectDisplayID ) [[[screen deviceDescription] objectForKey:@"NSScreenNumber"] unsignedIntValue];
-        if (dpyid == data->display) {
 #ifdef MAC_OS_X_VERSION_10_8
+    /* Neither CGDisplayScreenSize(description's NSScreenNumber) nor [NSScreen backingScaleFactor] can calculate the correct dpi in macOS. E.g. backingScaleFactor is always 2 in all display modes for rMBP 16" */
+    if (floor(NSAppKitVersionNumber) > NSAppKitVersionNumber10_7) {
+        NSRect framePoints = [screen frame];
+        NSRect framePixels = [screen convertRectToBacking:framePoints];
 
-            /* Neither CGDisplayScreenSize(description's NSScreenNumber) nor [NSScreen backingScaleFactor] can calculate the correct dpi in macOS. E.g. backingScaleFactor is always 2 in all display modes for rMBP 16" */
-            if (floor(NSAppKitVersionNumber) > NSAppKitVersionNumber10_7) {
-                NSRect framePoints = [screen frame];
-                NSRect framePixels = [screen convertRectToBacking:framePoints];
-
-                CGFloat widthPoints  = framePoints.size.width;
-                CGFloat heightPoints = framePoints.size.height;
-                CGFloat widthPixels  = framePixels.size.width;
-                CGFloat heightPixels = framePixels.size.height;
-
-                // SDL_Log ("widthPoints %f    heightPoints %f", widthPoints, heightPoints);
-                // SDL_Log ("widthPixels %f    heightPixels %f", widthPixels, heightPixels);
-
-                windowsCompatibleDpiW = (widthPixels / widthPoints) * 96.0;
-                windowsCompatibleDpiH = (heightPixels / heightPoints) * 96.0;
-                break;
-            } else
+        windowsCompatibleDpiW = (framePixels.size.width / framePoints.size.width) * 96.0;
+        windowsCompatibleDpiH = (framePixels.size.height / framePoints.size.height) * 96.0;
+    } else
 #endif
-            {
-                // fallback for 10.7
-                scaleFactor = [screen backingScaleFactor];
-                windowsCompatibleDpiW = scaleFactor * 96.0;
-                windowsCompatibleDpiH = scaleFactor * 96.0;
-                break;
-            }
-        }
+    {
+        // fallback for 10.7
+        CGFloat scaleFactor = [screen backingScaleFactor];
+        windowsCompatibleDpiW = scaleFactor * 96.0;
+        windowsCompatibleDpiH = scaleFactor * 96.0;
     }
 
     if (ddpi)
@@ -488,6 +695,10 @@ void Cocoa_GetDisplayModes(_THIS, SDL_VideoDisplay * display)
     SDL_DisplayMode desktopmode;
     CFArrayRef modes;
     CFDictionaryRef dict = NULL;
+
+    @autoreleasepool {
+        (void) Cocoa_GetScreenForDisplay(data); /* YoYo: updates a stale display ID */
+    }
 
     CVDisplayLinkCreateWithCGDisplay(data->display, &link);
 
@@ -584,6 +795,10 @@ int Cocoa_SetDisplayMode(_THIS, SDL_VideoDisplay * display, SDL_DisplayMode * mo
     SDL_DisplayModeData *data = (SDL_DisplayModeData *) mode->driverdata;
     CGDisplayFadeReservationToken fade_token = kCGDisplayFadeReservationInvalidToken;
     CGError result;
+
+    @autoreleasepool {
+        (void) Cocoa_GetScreenForDisplay(displaydata); /* YoYo: updates a stale display ID (Cocoa_QuitModes comes here too) */
+    }
 
     /* Fade to black to hide resolution-switching flicker */
     if (CGAcquireDisplayFadeReservation(5, &fade_token) == kCGErrorSuccess) {
